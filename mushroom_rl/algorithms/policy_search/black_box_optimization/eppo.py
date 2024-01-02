@@ -12,7 +12,7 @@ class ePPO(BlackBoxOptimization):
     Schulman J. et al.. 2017.
 
     """
-    def __init__(self, mdp_info, distribution, policy, optimizer, n_epochs_policy, batch_size, eps_ppo, ent_coeff=0.0):
+    def __init__(self, mdp_info, distribution, policy, optimizer, n_epochs_policy, batch_size, eps_ppo, ent_coeff=0.0, context_builder=None):
         """
         Constructor.
 
@@ -28,7 +28,7 @@ class ePPO(BlackBoxOptimization):
         self._eps_ppo = to_parameter(eps_ppo)
         self._ent_coeff = to_parameter(ent_coeff)
 
-        super().__init__(mdp_info, distribution, policy, backend='torch')
+        super().__init__(mdp_info, distribution, policy, context_builder=context_builder, backend='torch')
 
         self._add_save_attr(
             optimizer='torch',
