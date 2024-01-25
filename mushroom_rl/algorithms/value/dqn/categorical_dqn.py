@@ -1,10 +1,13 @@
 from copy import deepcopy
 
+import numpy as np
+
+import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from mushroom_rl.algorithms.value.dqn import AbstractDQN
-from mushroom_rl.approximators.parametric.torch_approximator import *
+from mushroom_rl.approximators.parametric import NumpyTorchApproximator
 from mushroom_rl.utils.torch import TorchUtils
 
 eps = torch.finfo(torch.float32).eps
@@ -111,7 +114,7 @@ class CategoricalDQN(AbstractDQN):
             _a_values='numpy'
         )
 
-        super().__init__(mdp_info, policy, TorchApproximator, **params)
+        super().__init__(mdp_info, policy, NumpyTorchApproximator, **params)
 
     def fit(self, dataset):
         self._replay_memory.add(dataset)

@@ -52,15 +52,13 @@ class TD3(DDPG):
         else:
             critic_params['n_models'] = 2
 
+        super().__init__(mdp_info, policy_class, policy_params, actor_params, actor_optimizer, critic_params,
+                         batch_size, initial_replay_size, max_replay_size, tau, policy_delay, critic_fit_params)
+
         self._add_save_attr(
             _noise_std='mushroom',
             _noise_clip='mushroom'
         )
-
-        super().__init__(mdp_info, policy_class, policy_params,  actor_params,
-                         actor_optimizer, critic_params, batch_size,
-                         initial_replay_size, max_replay_size, tau,
-                         policy_delay, critic_fit_params)
 
     def _loss(self, state):
         action = self._actor_approximator(state, **self._actor_predict_params)

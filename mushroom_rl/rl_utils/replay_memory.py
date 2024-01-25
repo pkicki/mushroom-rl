@@ -1,6 +1,7 @@
 import numpy as np
+import torch
 
-from mushroom_rl.core.serialization import Serializable
+from mushroom_rl.core import Dataset, Serializable
 from mushroom_rl.rl_utils.parameters import to_parameter
 
 
@@ -10,32 +11,39 @@ class ReplayMemory(Serializable):
     "Human-Level Control Through Deep Reinforcement Learning" by Mnih V. et al..
 
     """
-    def __init__(self, initial_size, max_size):
+    def __init__(self, mdp_info, agent_info, initial_size, max_size):
         """
         Constructor.
 
         Args:
-            initial_size (int): initial number of elements in the replay memory;
-            max_size (int): maximum number of elements that the replay memory
-                can contain.
+            mdp_info (MDPInfo): information about the MDP;
+            agent_info (AgentInfo): information about the agent;
+            initial_size (int): initial size of the replay buffer;
+            max_size (int): maximum size of the replay buffer;
 
         """
+
         self._initial_size = initial_size
         self._max_size = max_size
+        self._idx = 0
+        self._full = False
+        self._mdp_info = mdp_info
+        self._agent_info = agent_info
 
+        assert agent_info.backend in ["numpy", "torch"], f"{agent_info.backend} backend currently not supported in " \
+                                                         f"the replay memory class."
+
+        self._dataset = None
         self.reset()
 
         self._add_save_attr(
             _initial_size='primitive',
             _max_size='primitive',
+            _mdp_info='mushroom',
+            _agent_info='mushroom',
             _idx='primitive!',
             _full='primitive!',
-            _states='pickle!',
-            _actions='pickle!',
-            _rewards='pickle!',
-            _next_states='pickle!',
-            _absorbing='pickle!',
-            _last='pickle!'
+            _dataset='mushroom!',
         )
 
     def add(self, dataset, n_steps_return=1, gamma=1.):
@@ -43,31 +51,55 @@ class ReplayMemory(Serializable):
         Add elements to the replay memory.
 
         Args:
-            dataset (list): list of elements to add to the replay memory;
+            dataset (Dataset): dataset class elements to add to the replay memory;
             n_steps_return (int, 1): number of steps to consider for computing n-step return;
             gamma (float, 1.): discount factor for n-step return.
 
         """
-        assert n_steps_return > 0
 
+        assert n_steps_return > 0
+        assert self._dataset.is_stateful == dataset.is_stateful
+
+        state, action, reward, next_state, absorbing, last = dataset.parse(to=self._agent_info.backend)
+
+        if self._dataset.is_stateful:
+            policy_state, policy_next_state = dataset.parse_policy_state(to=self._agent_info.backend)
+        else:
+            policy_state, policy_next_state = (None, None)
+
+        # TODO: implement vectorized n_step_return to avoid loop
         i = 0
         while i < len(dataset) - n_steps_return + 1:
-            reward = dataset[i][2]
             j = 0
             while j < n_steps_return - 1:
-                if dataset[i + j][5]:
+                if last[i + j]:
                     i += j + 1
                     break
                 j += 1
-                reward += gamma ** j * dataset[i + j][2]
+                reward[i] += gamma ** j * reward[i + j]
             else:
-                self._states[self._idx] = dataset[i][0]
-                self._actions[self._idx] = dataset[i][1]
-                self._rewards[self._idx] = reward
 
-                self._next_states[self._idx] = dataset[i + j][3]
-                self._absorbing[self._idx] = dataset[i + j][4]
-                self._last[self._idx] = dataset[i + j][5]
+                if self._full:
+                    self._dataset.state[self._idx] = state[i]
+                    self._dataset.action[self._idx] = action[i]
+                    self._dataset.reward[self._idx] = reward[i]
+
+                    self._dataset.next_state[self._idx] = next_state[i + j]
+                    self._dataset.absorbing[self._idx] = absorbing[i + j]
+                    self._dataset.last[self._idx] = last[i + j]
+
+                    if self._dataset.is_stateful:
+                        self._dataset.policy_state[self._idx] = policy_state[i]
+                        self._dataset.policy_next_state[self._idx] = policy_next_state[i + j]
+
+                else:
+
+                    sample = [state[i], action[i], reward[i], next_state[i + j], absorbing[i + j], last[i + j]]
+
+                    if self._dataset.is_stateful:
+                        sample += [policy_state[i], policy_next_state[i+j]]
+
+                    self._dataset.append(sample, {})
 
                 self._idx += 1
                 if self._idx == self._max_size:
@@ -79,27 +111,20 @@ class ReplayMemory(Serializable):
     def get(self, n_samples):
         """
         Returns the provided number of states from the replay memory.
+
         Args:
             n_samples (int): the number of samples to return.
         Returns:
             The requested number of samples.
         """
-        s = list()
-        a = list()
-        r = list()
-        ss = list()
-        ab = list()
-        last = list()
-        for i in np.random.randint(self.size, size=n_samples):
-            s.append(np.array(self._states[i]))
-            a.append(self._actions[i])
-            r.append(self._rewards[i])
-            ss.append(np.array(self._next_states[i]))
-            ab.append(self._absorbing[i])
-            last.append(self._last[i])
+        idxs = self._dataset.array_backend.randint(0, len(self._dataset), (n_samples,))
 
-        return np.array(s), np.array(a), np.array(r), np.array(ss),\
-            np.array(ab), np.array(last)
+        dataset_batch = self._dataset[idxs]
+
+        if self._dataset.is_stateful:
+            return *dataset_batch.parse(), *dataset_batch.parse_policy_state()
+        else:
+            return dataset_batch.parse()
 
     def reset(self):
         """
@@ -108,12 +133,8 @@ class ReplayMemory(Serializable):
         """
         self._idx = 0
         self._full = False
-        self._states = [None for _ in range(self._max_size)]
-        self._actions = [None for _ in range(self._max_size)]
-        self._rewards = [None for _ in range(self._max_size)]
-        self._next_states = [None for _ in range(self._max_size)]
-        self._absorbing = [None for _ in range(self._max_size)]
-        self._last = [None for _ in range(self._max_size)]
+        self._dataset = Dataset(mdp_info=self._mdp_info, agent_info=self._agent_info, n_steps=self._max_size,
+                                n_envs=1, backend=self._agent_info.backend, state_dtype=float, action_dtype=float)
 
     @property
     def initialized(self):
@@ -134,62 +155,204 @@ class ReplayMemory(Serializable):
         """
         return self._idx if not self._full else self._max_size
 
+    @property
+    def _backend(self):
+        return self._dataset.array_backend
+
     def _post_load(self):
         if self._full is None:
             self.reset()
 
 
-class SumTree(object):
+class SequenceReplayMemory(ReplayMemory):
+    """
+    This class extend the base replay memory to allow sampling sequences of a certain length. This is useful for
+    training recurrent agents or agents operating on a window of states etc.
+
+    """
+    def __init__(self, mdp_info, agent_info, initial_size, max_size, truncation_length):
+        """
+        Constructor.
+
+        Args:
+            mdp_info (MDPInfo): information about the MDP;
+            agent_info (AgentInfo): information about the agent;
+            initial_size (int): initial size of the replay buffer;
+            max_size (int): maximum size of the replay buffer;
+            truncation_length (int): truncation length to be sampled;
+        """
+        self._truncation_length = truncation_length
+        self._action_space_shape = mdp_info.action_space.shape
+
+        super(SequenceReplayMemory, self).__init__(mdp_info, agent_info, initial_size, max_size)
+
+        self._add_save_attr(
+            _truncation_length='primitive',
+            _action_space_shape='primitive'
+        )
+
+    def get(self, n_samples):
+        """
+        Returns the provided number of states from the replay memory.
+        Args:
+            n_samples (int): the number of samples to return.
+        Returns:
+            The requested number of samples.
+        """
+
+        s = self._backend.zeros(n_samples, self._truncation_length, *self._mdp_info.observation_space.shape,
+                                dtype=self._mdp_info.observation_space.data_type)
+        a = self._backend.zeros(n_samples, self._truncation_length, *self._mdp_info.action_space.shape,
+                                dtype=self._mdp_info.action_space.data_type)
+        r = self._backend.zeros(n_samples, 1)
+        ss = self._backend.zeros(n_samples, self._truncation_length, *self._mdp_info.observation_space.shape,
+                                 dtype=self._mdp_info.observation_space.data_type)
+        ab = self._backend.zeros(n_samples, 1, dtype=int)
+        last = self._backend.zeros(n_samples, dtype=int)
+        ps = self._backend.zeros(n_samples, self._truncation_length, *self._agent_info.policy_state_shape)
+        nps = self._backend.zeros(n_samples, self._truncation_length, *self._agent_info.policy_state_shape)
+        pa = self._backend.zeros(n_samples, self._truncation_length, *self._mdp_info.action_space.shape,
+                                 dtype=self._mdp_info.action_space.data_type)
+        lengths = list()
+
+        for num, i in enumerate(np.random.randint(self.size, size=n_samples)):
+
+            with torch.no_grad():
+
+                # determine the begin of a sequence
+                begin_seq = np.maximum(i - self._truncation_length + 1, 0)
+                end_seq = i + 1
+
+                # the sequence can contain more than one trajectory, check to only include one
+                lasts_absorbing = self._dataset.last[begin_seq: i]
+                begin_traj = self._backend.where(lasts_absorbing > 0)
+                more_than_one_traj = len(*begin_traj) > 0
+                if more_than_one_traj:
+                    # take the beginning of the last trajectory
+                    begin_seq = begin_seq + begin_traj[0][-1] + 1
+
+                # determine prev action
+                if more_than_one_traj or begin_seq == 0 or self._dataset.last[begin_seq-1]:
+                    prev_actions = self._dataset.action[begin_seq:end_seq - 1]
+                    init_prev_action = self._backend.zeros(1, *self._action_space_shape)
+                    if len(prev_actions) == 0:
+                        prev_actions = init_prev_action
+                    else:
+                        prev_actions = self._backend.concatenate([init_prev_action, prev_actions])
+                else:
+                    prev_actions = self._dataset.action[begin_seq - 1:end_seq - 1]
+
+                # write data
+                s[num, :end_seq-begin_seq] = self._dataset.state[begin_seq:end_seq]
+                ss[num, :end_seq-begin_seq] = self._dataset.next_state[begin_seq:end_seq]
+                a[num, :end_seq-begin_seq] = self._dataset.action[begin_seq:end_seq]
+                ps[num, :end_seq-begin_seq] = self._dataset.policy_state[begin_seq:end_seq]
+                nps[num, :end_seq-begin_seq] = self._dataset.policy_next_state[begin_seq:end_seq]
+                pa[num, :end_seq-begin_seq] = prev_actions
+                r[num] = self._dataset.reward[i]
+                ab[num] = self._dataset.absorbing[i]
+                last[num] = self._dataset.last[i]
+
+                lengths.append(end_seq - begin_seq)
+
+        if self._dataset.is_stateful:
+            return s, a, r, ss, ab, last, ps, nps, pa, lengths
+        else:
+            return s, a, r, ss, ab, last, pa, lengths
+
+
+class SumTree(Serializable):
     """
     This class implements a sum tree data structure.
     This is used, for instance, by ``PrioritizedReplayMemory``.
 
     """
-    def __init__(self, max_size):
+    def __init__(self, mdp_info, agent_info, max_size):
         """
         Constructor.
 
         Args:
-            max_size (int): maximum size of the tree.
+            mdp_info (MDPInfo): information about the MDP;
+            agent_info (AgentInfo): information about the agent;
+            max_size (int): maximum size of the tree;
 
         """
         self._max_size = max_size
         self._tree = np.zeros(2 * max_size - 1)
-        self._data = [None for _ in range(max_size)]
+        self._mdp_info = mdp_info
+        self._agent_info = agent_info
+        self.dataset = Dataset(mdp_info=mdp_info, agent_info=agent_info, n_steps=max_size,
+                               n_envs=1, backend=agent_info.backend, state_dtype=float, action_dtype=float)
         self._idx = 0
         self._full = False
+
+        super().__init__()
+        self._add_save_attr(
+            _max_size="primitive",
+            _idx="primitive",
+            _full="primitive",
+            _tree="numpy",
+            _mdp_info="mushroom",
+            _agent_info="mushroom",
+            dataset="mushroom!")
 
     def add(self, dataset, priority, n_steps_return, gamma):
         """
         Add elements to the tree.
 
         Args:
-            dataset (list): list of elements to add to the tree;
+            dataset (Dataset): dataset class elements to add to the replay memory;
             priority (np.ndarray): priority of each sample in the dataset;
             n_steps_return (int): number of steps to consider for computing n-step return;
             gamma (float): discount factor for n-step return.
 
         """
+
+        assert np.all(np.array(priority) > 0.0)
+
+        state, action, reward, next_state, absorbing, last = dataset.parse(to=self._agent_info.backend)
+
+        if self.dataset.is_stateful:
+            policy_state, policy_next_state = dataset.parse_policy_state(to=self._agent_info.backend)
+        else:
+            policy_state, policy_next_state = (None, None)
+
+        # TODO: implement vectorized n_step_return to avoid loop
         i = 0
         while i < len(dataset) - n_steps_return + 1:
-            reward = dataset[i][2]
-
             j = 0
             while j < n_steps_return - 1:
-                if dataset[i + j][5]:
+                if last[i + j]:
                     i += j + 1
                     break
                 j += 1
-                reward += gamma ** j * dataset[i + j][2]
+                reward[i] += gamma ** j * reward[i + j]
             else:
-                d = list(dataset[i])
-                d[2] = reward
-                d[3] = dataset[i + j][3]
-                d[4] = dataset[i + j][4]
-                d[5] = dataset[i + j][5]
+
+                if self._full:
+                    self.dataset.state[self._idx] = state[i]
+                    self.dataset.action[self._idx] = action[i]
+                    self.dataset.reward[self._idx] = reward[i]
+
+                    self.dataset.next_state[self._idx] = next_state[i + j]
+                    self.dataset.absorbing[self._idx] = absorbing[i + j]
+                    self.dataset.last[self._idx] = last[i + j]
+
+                    if self.dataset.is_stateful:
+                        self.dataset.policy_state[self._idx] = policy_state[i]
+                        self.dataset.policy_next_state[self._idx] = policy_next_state[i + j]
+
+                else:
+
+                    sample = [state[i], action[i], reward[i], next_state[i + j], absorbing[i + j], last[i + j]]
+
+                    if self.dataset.is_stateful:
+                        sample += [policy_state[i], policy_next_state[i+j]]
+
+                    self.dataset.append(sample, {})
+
                 idx = self._idx + self._max_size - 1
 
-                self._data[self._idx] = d
                 self.update([idx], [priority[i]])
 
                 self._idx += 1
@@ -213,7 +376,23 @@ class SumTree(object):
         idx = self._retrieve(s, 0)
         data_idx = idx - self._max_size + 1
 
-        return idx, self._tree[idx], self._data[data_idx]
+        return idx, self._tree[idx], self.dataset[data_idx]
+
+    def get_ind(self, s):
+        """
+        Returns the provided number of states from the replay memory.
+
+        Args:
+            s (float): the value of the samples to return.
+
+        Returns:
+            The requested sample.
+
+        """
+        idx = self._retrieve(s, 0)
+        data_idx = idx - self._max_size + 1
+
+        return idx, self._tree[idx], data_idx
 
     def update(self, idx, priorities):
         """
@@ -281,6 +460,11 @@ class SumTree(object):
         """
         return self._tree[0]
 
+    def _post_load(self):
+        if self.dataset is None:
+            self.dataset = Dataset(mdp_info=self._mdp_info, agent_info=self._agent_info, n_steps=self._max_size,
+                                   n_envs=1, backend=self._agent_info.backend, state_dtype=float, action_dtype=float)
+
 
 class PrioritizedReplayMemory(Serializable):
     """
@@ -288,11 +472,13 @@ class PrioritizedReplayMemory(Serializable):
     one used in "Prioritized Experience Replay" by Schaul et al., 2015.
 
     """
-    def __init__(self, initial_size, max_size, alpha, beta, epsilon=.01):
+    def __init__(self, mdp_info, agent_info, initial_size, max_size, alpha, beta, epsilon=.01):
         """
         Constructor.
 
         Args:
+            mdp_info (MDPInfo): information about the MDP;
+            agent_info (AgentInfo): information about the agent;
             initial_size (int): initial number of elements in the replay
                 memory;
             max_size (int): maximum number of elements that the replay memory
@@ -308,7 +494,7 @@ class PrioritizedReplayMemory(Serializable):
         self._beta = to_parameter(beta)
         self._epsilon = epsilon
 
-        self._tree = SumTree(max_size)
+        self._tree = SumTree(mdp_info, agent_info, max_size)
 
         self._add_save_attr(
             _initial_size='primitive',
@@ -316,7 +502,7 @@ class PrioritizedReplayMemory(Serializable):
             _alpha='primitive',
             _beta='primitive',
             _epsilon='primitive',
-            _tree='pickle!'
+            _tree='mushroom'
         )
 
     def add(self, dataset, p, n_steps_return=1, gamma=1.):
@@ -324,7 +510,7 @@ class PrioritizedReplayMemory(Serializable):
         Add elements to the replay memory.
 
         Args:
-            dataset (list): list of elements to add to the replay memory;
+            dataset (Dataset): list of elements to add to the replay memory;
             p (np.ndarray): priority of each sample in the dataset.
             n_steps_return (int, 1): number of steps to consider for computing n-step return;
             gamma (float, 1.): discount factor for n-step return.
@@ -345,39 +531,34 @@ class PrioritizedReplayMemory(Serializable):
             The requested number of samples.
 
         """
-        states = [None for _ in range(n_samples)]
-        actions = [None for _ in range(n_samples)]
-        rewards = [None for _ in range(n_samples)]
-        next_states = [None for _ in range(n_samples)]
-        absorbing = [None for _ in range(n_samples)]
-        last = [None for _ in range(n_samples)]
 
-        idxs = np.zeros(n_samples, dtype=int)
-        priorities = np.zeros(n_samples)
+        idxs = self._backend.zeros(n_samples, dtype=int)
+        priorities = self._backend.zeros(n_samples, dtype=float)
+        data_idxs = self._backend.zeros(n_samples, dtype=int)
 
         total_p = self._tree.total_p
         segment = total_p / n_samples
 
-        a = np.arange(n_samples) * segment
-        b = np.arange(1, n_samples + 1) * segment
+        a = self._backend.arange(0, n_samples) * segment
+        b = self._backend.arange(1, n_samples + 1) * segment
         samples = np.random.uniform(a, b)
+
         for i, s in enumerate(samples):
-            idx, p, data = self._tree.get(s)
+            idx, p, data_idx = self._tree.get_ind(s)
 
             idxs[i] = idx
             priorities[i] = p
-            states[i], actions[i], rewards[i], next_states[i], absorbing[i],\
-                last[i] = data
-            states[i] = np.array(states[i])
-            next_states[i] = np.array(next_states[i])
+            data_idxs[i] = data_idx
 
         sampling_probabilities = priorities / self._tree.total_p
         is_weight = (self._tree.size * sampling_probabilities) ** -self._beta()
         is_weight /= is_weight.max()
 
-        return np.array(states), np.array(actions), np.array(rewards),\
-            np.array(next_states), np.array(absorbing), np.array(last),\
-            idxs, is_weight
+        if self._tree.dataset.is_stateful:
+            return *self._tree.dataset[data_idxs].parse(), \
+                   *self._tree.dataset[data_idxs].parse_policy_state(), idxs, is_weight
+        else:
+            return *self._tree.dataset[data_idxs].parse(), idxs, is_weight
 
     def update(self, error, idx):
         """
@@ -413,6 +594,6 @@ class PrioritizedReplayMemory(Serializable):
         """
         return self._tree.max_p if self.initialized else 1.
 
-    def _post_load(self):
-        if self._tree is None:
-            self._tree = SumTree(self._max_size)
+    @property
+    def _backend(self):
+        return self._tree.dataset.array_backend

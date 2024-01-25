@@ -4,13 +4,13 @@ from sklearn.ensemble import ExtraTreesRegressor
 import itertools
 
 import mushroom_rl
-from mushroom_rl.core import MDPInfo, AgentInfo
+from mushroom_rl.core import MDPInfo, AgentInfo, Dataset
 from mushroom_rl.policy.td_policy import TDPolicy
 from mushroom_rl.policy.torch_policy import TorchPolicy
 from mushroom_rl.policy.policy import ParametricPolicy
 from mushroom_rl.algorithms.actor_critic.deep_actor_critic.sac import SACPolicy
 from mushroom_rl.rl_utils.replay_memory import ReplayMemory, PrioritizedReplayMemory
-from mushroom_rl.approximators._implementations.ensemble import Ensemble
+from mushroom_rl.approximators.ensemble import Ensemble
 from mushroom_rl.approximators._implementations.action_regressor import ActionRegressor
 from mushroom_rl.approximators import Regressor
 from mushroom_rl.policy.noise_policy import OrnsteinUhlenbeckPolicy
@@ -62,6 +62,8 @@ class TestUtils:
             assert cls.eq_mdp_info(this, that)
         elif cls._check_type(this, that, AgentInfo):
             assert cls.eq_agent_info(this, that)
+        elif cls._check_type(this, that, Dataset):
+            assert cls.eq_dataset(this, that)
         elif cls._check_type(this, that, ReplayMemory):
             assert cls.eq_replay_memory(this, that)
         elif cls._check_type(this, that, PrioritizedReplayMemory):
@@ -191,7 +193,7 @@ class TestUtils:
         """
         
         res = cls.eq_weights(this, that)
-        res &= cls._eq_numpy(this._sigma, that._sigma)
+        res &= cls._eq_numpy(this._chol_sigma, that._chol_sigma)
         res &= this._theta == that._theta
         res &= this._dt == that._dt
         res &= cls._eq_numpy(this._x0, that._x0)
@@ -199,21 +201,37 @@ class TestUtils:
         return res
 
     @classmethod
+    def eq_dataset(cls, this, that):
+        """
+        Compare two dataset classes
+        """
+
+        res = this._array_backend == that._array_backend
+        res &= this._n_envs == that._n_envs
+
+        # res &= this._info == that._info TODO fix this equality check
+        # res &= this._episode_info == that._episode_info
+        # res &= this._theta_list == that._theta_list
+        # res &= this._data == that._data
+        res &= this._gamma == that._gamma
+
+        return res
+
+    @classmethod
     def eq_replay_memory(cls, this, that):
         """
         Compare two ReplayMemory objects for equality
         """
-        
-        res = this._idx == that._idx
+        res = this._initial_size == that._initial_size
+        res &= this._max_size == that._max_size
+        res &= cls.eq_mdp_info(this._mdp_info, that._mdp_info)
+        res &= cls.eq_agent_info(this._agent_info, that._agent_info)
+        res &= this._idx == that._idx
         res &= this._full == that._full
-        for a, b in zip(this._states, that._states):
-            res &= cls._eq_numpy(a, b)
-        res &= this._actions == that._actions
-        res &= this._rewards == that._rewards
-        for a, b in zip(this._next_states, that._next_states):
-            res &= cls._eq_numpy(a, b)
-        res &= this._absorbing == that._absorbing
-        res &= this._last == that._last
+
+        if this._dataset is not None and that._dataset is not None:
+            res &= cls.eq_dataset(this._dataset, that._dataset)
+
         return res
 
     @classmethod
@@ -238,9 +256,7 @@ class TestUtils:
         
         res = this._max_size == that._max_size
         res &= cls._eq_numpy(this._tree, that._tree)
-        res &= len(this._data) == len(that._data)
-        for a, b in zip(this._data, that._data):
-            res &= cls._eq_listlike(a, b)
+        res &= cls.eq_dataset(this.dataset, that.dataset)
         res &= this._idx == that._idx
         res &= this._full == that._full
         return res

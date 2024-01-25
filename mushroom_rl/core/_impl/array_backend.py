@@ -60,6 +60,26 @@ class ArrayBackend(object):
         raise NotImplementedError
 
     @staticmethod
+    def concatenate(list_of_arrays, dim):
+        raise NotImplementedError
+
+    @staticmethod
+    def where(cond, x=None, y=None):
+        raise NotImplementedError
+
+    @staticmethod
+    def expand_dims(array, dim):
+        raise NotImplementedError
+
+    @staticmethod
+    def randint(low, high, size):
+        raise NotImplementedError
+
+    @staticmethod
+    def arange(start, stop, step=1, dtype=None):
+        raise NotImplementedError
+
+    @staticmethod
     def copy(array):
         raise NotImplementedError
 
@@ -100,6 +120,31 @@ class NumpyBackend(ArrayBackend):
     @staticmethod
     def ones(*dims, dtype=float):
         return np.ones(dims, dtype=dtype)
+
+    @staticmethod
+    def concatenate(list_of_arrays, dim=0):
+        return np.concatenate(list_of_arrays, axis=dim)
+
+    @staticmethod
+    def where(cond, x=None, y=None):
+        assert (x is None) == (y is None), "Either both or neither of x and y should be given."
+        if x is None:
+            return np.where(cond)
+        else:
+            np.where(cond, x, y)
+
+    @staticmethod
+    def expand_dims(array, dim):
+        return np.expand_dims(array, axis=dim)
+
+    @staticmethod
+    def randint(low, high, size):
+        assert type(size) == tuple
+        return np.random.randint(low, high, size)
+
+    @staticmethod
+    def arange(start, stop, step=1, dtype=None):
+        return np.arange(start, stop, step, dtype=dtype)
 
     @staticmethod
     def copy(array):
@@ -145,6 +190,30 @@ class TorchBackend(ArrayBackend):
     @staticmethod
     def ones(*dims, dtype=torch.float32):
         return torch.ones(*dims, dtype=dtype, device=TorchUtils.get_device())
+
+    @staticmethod
+    def concatenate(list_of_arrays, dim=0):
+        return torch.concat(list_of_arrays, dim=dim)
+
+    @staticmethod
+    def where(cond, x=None, y=None):
+        assert (x is None) == (y is None), "Either both or neither of x and y should be given."
+        if x is None:
+            return torch.where(cond)
+        else:
+            torch.where(cond, x, y)
+
+    @staticmethod
+    def expand_dims(array, dim):
+        return torch.unsqueeze(array, dim=dim)
+
+    @staticmethod
+    def randint(low, high, size):
+        return torch.randint(low, high, size)
+
+    @staticmethod
+    def arange(start, stop, step=1, dtype=None):
+        return torch.arange(start, stop, step, dtype=dtype)
 
     @staticmethod
     def copy(array):

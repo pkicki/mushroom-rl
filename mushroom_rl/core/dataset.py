@@ -2,16 +2,31 @@ import numpy as np
 
 from collections import defaultdict
 
+import torch
+
 from mushroom_rl.core.serialization import Serializable
 
 from ._impl import *
 
 
 class Dataset(Serializable):
-    def __init__(self, mdp_info, agent_info, n_steps=None, n_episodes=None, n_envs=1):
+    def __init__(self, mdp_info, agent_info, n_steps=None, n_episodes=None, n_envs=1, backend=None,
+                 device=None, state_dtype=None, action_dtype=None):
         assert (n_steps is not None and n_episodes is None) or (n_steps is None and n_episodes is not None)
 
-        self._array_backend = ArrayBackend.get_array_backend(mdp_info.backend)
+        if backend is None:
+            backend = mdp_info.backend
+
+        if state_dtype is None:
+            state_dtype = mdp_info.observation_space.data_type
+
+        if action_dtype is None:
+            action_dtype = mdp_info.action_space.data_type
+
+        if backend != "torch":
+            assert device is None
+
+        self._array_backend = ArrayBackend.get_array_backend(backend)
         self._n_envs = n_envs
 
         if n_steps is not None:
@@ -38,33 +53,57 @@ class Dataset(Serializable):
         else:
             policy_state_shape = None
 
-        state_type = mdp_info.observation_space.data_type
-        action_type = mdp_info.action_space.data_type
-
         self._info = defaultdict(list)
         self._episode_info = defaultdict(list)
         self._theta_list = list()
 
-        if mdp_info.backend == 'numpy':
-            self._data = NumpyDataset(state_type, state_shape, action_type, action_shape, reward_shape, base_shape,
+        if backend == 'numpy':
+            self._data = NumpyDataset(state_dtype, state_shape, action_dtype, action_shape, reward_shape, base_shape,
                                       policy_state_shape, mask_shape)
-        elif mdp_info.backend == 'torch':
-            self._data = TorchDataset(state_type, state_shape, action_type, action_shape, reward_shape, base_shape,
-                                      policy_state_shape, mask_shape)
+        elif backend == 'torch':
+            self._data = TorchDataset(state_dtype, state_shape, action_dtype, action_shape, reward_shape, base_shape,
+                                      policy_state_shape, mask_shape, device=device)
         else:
             self._data = ListDataset(policy_state_shape is not None, mask_shape is not None)
 
         self._gamma = mdp_info.gamma
 
-        self._add_save_attr(
-            _info='pickle',
-            _episode_info='pickle',
-            _theta_list='pickle',
-            _data='mushroom',
-            _array_backend='primitive',
-            _gamma='primitive',
-            _n_envs='primitive'
-        )
+        self._add_all_save_attr()
+
+    @classmethod
+    def create_new_instance(cls, dataset=None, gamma=None):
+        """
+        Creates an empty instance of the Dataset and populates essential data structures
+
+        Args:
+            dataset (Dataset, None): a template dataset to be used to create the new instance.
+            gamma (float, None): The discount factor to be used.
+
+        Returns:
+            A new empty instance of the dataset.
+
+        """
+        assert (dataset is not None and gamma is None) or (dataset is None and gamma is not None)
+
+        new_dataset = cls.__new__(cls)
+
+        if dataset is not None:
+            new_dataset._gamma = dataset._gamma
+            new_dataset._array_backend = dataset._array_backend
+            new_dataset._n_envs = dataset._n_envs
+        else:
+            new_dataset._gamma = gamma
+            new_dataset._array_backend = None
+            new_dataset._n_envs = None
+
+        new_dataset._info = None
+        new_dataset._episode_info = None
+        new_dataset._data = None
+        new_dataset._theta_list = None
+
+        new_dataset._add_all_save_attr()
+
+        return new_dataset
 
     @classmethod
     def from_array(cls, states, actions, rewards, next_states, absorbings, lasts,
@@ -97,8 +136,7 @@ class Dataset(Serializable):
         if policy_state is not None:
             assert len(states) == len(policy_state) == len(policy_next_state)
 
-        dataset = cls.__new__(cls)
-        dataset._gamma = gamma
+        dataset = cls.create_new_instance(gamma=gamma)
 
         if info is None:
             dataset._info = defaultdict(list)
@@ -127,16 +165,6 @@ class Dataset(Serializable):
 
         dataset._n_envs = 1
 
-        dataset._add_save_attr(
-            _info='pickle',
-            _episode_info='pickle',
-            _theta_list='pickle',
-            _data='mushroom',
-            _converter='primitive',
-            _gamma='primitive',
-            _n_envs='primitive'
-        )
-
         return dataset
 
     def append(self, step, info):
@@ -163,7 +191,7 @@ class Dataset(Serializable):
         self._data.clear()
 
     def get_view(self, index, copy=False):
-        dataset = self.copy()
+        dataset = self.create_new_instance(dataset=self)
 
         info_slice = defaultdict(list)
         for key in self._info.keys():
@@ -180,7 +208,7 @@ class Dataset(Serializable):
         return self[0]
 
     def __getitem__(self, index):
-        if isinstance(index, (slice, np.ndarray)):
+        if isinstance(index, (slice, np.ndarray)) or isinstance(index, (slice, torch.Tensor)):
             return self.get_view(index)
         elif isinstance(index, int) and index < len(self._data):
             return self._data[index]
@@ -188,15 +216,15 @@ class Dataset(Serializable):
             raise IndexError
 
     def __add__(self, other):
-        result = self.copy()
-
-        new_info = self._merge_info(result.info, other.info)
-        new_episode_info = self._merge_info(result.episode_info, other.episode_info)
+        result = self.create_new_instance(dataset=self)
+        new_info = self._merge_info(self.info, other.info)
+        new_episode_info = self._merge_info(self.episode_info, other.episode_info)
 
         result._info = new_info
         result._episode_info = new_episode_info
-        result._theta_list = result._theta_list + other._theta_list
+        result._theta_list = self._theta_list + other._theta_list
         result._data = self._data + other._data
+        result._gamma = self._gamma
 
         return result
 
@@ -252,9 +280,6 @@ class Dataset(Serializable):
         """
         Compute the length of each episode in the dataset.
 
-        Args:
-            dataset (list): the dataset to consider.
-
         Returns:
             A list of length of each episode in the dataset.
 
@@ -281,29 +306,42 @@ class Dataset(Serializable):
     def discounted_return(self):
         return self.compute_J(self._gamma)
 
-    def parse(self, to='numpy'):
+    @property
+    def array_backend(self):
+        return self._array_backend
+
+    @property
+    def is_stateful(self):
+        return self._data.is_stateful
+
+    def parse(self, to=None):
         """
         Return the dataset as set of arrays.
-
-        to (str, numpy):  the backend to be used for the returned arrays.
+        Args:
+            to (str, None):  the backend to be used for the returned arrays. By default, the dataset backend is used.
 
         Returns:
             A tuple containing the arrays that define the dataset, i.e. state, action, next state, absorbing and last
 
         """
+        if to is None:
+            to = self._array_backend.get_backend_name()
         return self._array_backend.convert(self.state, self.action, self.reward, self.next_state,
                                            self.absorbing, self.last, to=to)
 
-    def parse_policy_state(self, to='numpy'):
+    def parse_policy_state(self, to=None):
         """
         Return the dataset as set of arrays.
 
-        to (str, numpy):  the backend to be used for the returned arrays.
+        Args:
+            to (str, None):  the backend to be used for the returned arrays. By default, the dataset backend is used.
 
         Returns:
             A tuple containing the arrays that define the dataset, i.e. state, action, next state, absorbing and last
 
         """
+        if to is None:
+            to = self._array_backend.get_backend_name()
         return self._array_backend.convert(self.policy_state, self.policy_next_state, to=to)
 
     def select_first_episodes(self, n_episodes):
@@ -311,7 +349,6 @@ class Dataset(Serializable):
         Return the first ``n_episodes`` episodes in the provided dataset.
 
         Args:
-            dataset (list): the dataset to consider;
             n_episodes (int): the number of episodes to pick from the dataset;
 
         Returns:
@@ -329,7 +366,6 @@ class Dataset(Serializable):
         dataset.
 
         Args:
-            dataset (list): the dataset to consider;
             n_samples (int): the number of samples to pick from the dataset.
 
         Returns:
@@ -350,9 +386,6 @@ class Dataset(Serializable):
         """
         Get the initial states of a dataset
 
-        Args:
-            dataset (list): the dataset to consider.
-
         Returns:
             An array of initial states of the considered dataset.
 
@@ -370,7 +403,6 @@ class Dataset(Serializable):
         Compute the cumulative discounted reward of each episode in the dataset.
 
         Args:
-            dataset (list): the dataset to consider;
             gamma (float, 1.): discount factor.
 
         Returns:
@@ -399,7 +431,6 @@ class Dataset(Serializable):
         Compute the metrics of each complete episode in the dataset.
 
         Args:
-            dataset (list): the dataset to consider;
             gamma (float, 1.): the discount factor.
 
         Returns:
@@ -426,6 +457,17 @@ class Dataset(Serializable):
             return J.min(), J.max(), J.mean(), median, len(J)
         else:
             return 0, 0, 0, 0, 0
+
+    def _add_all_save_attr(self):
+        self._add_save_attr(
+            _info='pickle',
+            _episode_info='pickle',
+            _theta_list='pickle',
+            _data='mushroom',
+            _array_backend='primitive',
+            _gamma='primitive',
+            _n_envs='primitive'
+        )
 
     @staticmethod
     def _append_info(info, step_info):

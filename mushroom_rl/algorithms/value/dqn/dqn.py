@@ -1,5 +1,3 @@
-import torch
-
 from mushroom_rl.algorithms.value.dqn import AbstractDQN
 
 
@@ -15,4 +13,4 @@ class DQN(AbstractDQN):
         if absorbing.any():
             q *= 1 - absorbing.reshape(-1, 1)
 
-        return q.max(1).values.detach()
+        return q.max(1)
