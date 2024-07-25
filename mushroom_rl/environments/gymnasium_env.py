@@ -111,7 +111,6 @@ class Gymnasium(Environment):
             #    return self.env.render()
             #else:
             #    return None
-
         return None
 
     def stop(self):
