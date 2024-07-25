@@ -116,6 +116,8 @@ class Serializable(object):
             setattr(loaded_object, '_save_attributes', save_attributes)
 
             for att, method in save_attributes.items():
+                if att == "env_info":
+                    continue
                 mandatory = not method.endswith('!')
                 method = method[:-1] if not mandatory else method
                 file_name = Serializable._append_folder(

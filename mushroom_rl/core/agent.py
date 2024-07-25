@@ -112,7 +112,7 @@ class Agent(Serializable):
             A tuple containing the policy initial state and, optionally, the policy parameters
 
         """
-        return self._convert_to_env_backend(self.policy.reset()), None
+        return self._convert_to_env_backend(self.policy.reset(initial_state)), None
 
     def episode_start_vectorized(self, initial_states, episode_info, start_mask):
         """
